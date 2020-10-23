@@ -66,14 +66,11 @@ def main(_run, _config, _log):
     cudnn.enabled = True
     cudnn.benchmark = True
     device = torch.device(f"cuda:{_config['gpu_id']}")
-    # torch.cuda.set_device(device=_config['gpu_id'])
-    # torch.set_num_threads(1)
 
     resize_dim = _config['input_size']
     encoded_h = int(resize_dim[0] / 2**_config['n_pool'])
     encoded_w = int(resize_dim[1] / 2**_config['n_pool'])
 
-    # initializer = Initializer(_config['path']['init_path']).to(device)
     s_encoder = SupportEncoder(_config['path']['init_path'], device)#.to(device)
     q_encoder = QueryEncoder(_config['path']['init_path'], device)#.to(device)
     decoder = Decoder(input_res=(encoded_h, encoded_w), output_res=resize_dim).to(device)
@@ -94,45 +91,24 @@ def main(_run, _config, _log):
         pin_memory=False, #True load data while training gpu
         drop_last=True
     )
-    validationloader = DataLoader(
-        dataset=val_dataset,
-        batch_size=1,
-        # batch_size=_config['batch_size'],
-        shuffle=True,
-        num_workers=_config['n_work'],
-        pin_memory=False,#True
-        drop_last=False
-    )
-
-    # all_samples = test_loader_Spleen(split=1) # for iterative validation
 
     _log.info('###### Set optimizer ######')
     print(_config['optim'])
-    # optimizer = torch.optim.SGD(model.parameters(), **_config['optim'])
     optimizer = torch.optim.Adam(#list(initializer.parameters()) +
                                  list(s_encoder.parameters()) +
                                  list(q_encoder.parameters()) +
                                  list(decoder.parameters()),
                                  _config['optim']['lr'])
-    # scheduler = MultiStepLR(optimizer, milestones=_config['lr_milestones'], gamma=0.1)
     scheduler = MultiStepLR(optimizer, milestones=_config['lr_milestones'], gamma=0.1)
     pos_weight = torch.tensor([0.3 , 1], dtype=torch.float).to(device)
-    # criterion = nn.CrossEntropyLoss(weight=pos_weight)
     criterion = nn.BCELoss()
-    # criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    # criterion = nn.MSELoss()
 
     if _config['record']:  ## tensorboard visualization
         _log.info('###### define tensorboard writer #####')
         _log.info(f'##### board/train_{_config["board"]}_{date()}')
         writer = SummaryWriter(f'board/train_{_config["board"]}_{date()}')
 
-    i_iter = 0
-    log_loss = {'loss': 0, 'align_loss': 0}
-    min_val_loss = 100000.0
-    min_iter = 0
-    min_epoch = 0
-    iter_n_train, iter_n_val = len(trainloader), len(validationloader)
+    iter_n_train = len(trainloader)
     _log.info('###### Training ######')
     for i_epoch in range(_config['n_steps']):
         loss_epoch = 0
@@ -174,38 +150,8 @@ def main(_run, _config, _log):
                 batch_i = 0
                 frames = []
                 frames += overlay_color(q_xi[batch_i], yhati[batch_i].round(), q_yi[batch_i], scale=_config['scale'])
-                # frames += overlay_color(s_xi[batch_i], blank, s_yi[batch_i], scale=_config['scale'])
                 visual = make_grid(frames, normalize=True, nrow=2)
                 writer.add_image("train/visual", visual, i_epoch)
-
-        with torch.no_grad(): ## validation stage
-            loss_valid = 0
-            for i_iter, sample_valid in enumerate(validationloader):
-                optimizer.zero_grad()
-                s_x = sample_valid['s_x'].to(device)  # [B, Support, slice_num, 1, 256, 256]
-                s_y = sample_valid['s_y'].to(device)  # [B, Support, slice_num, 1, 256, 256]
-                q_x = sample_valid['q_x'].to(device)  # [B, slice_num, 1, 256, 256]
-                q_y = sample_valid['q_y'].to(device)  # [B, slice_num, 1, 256, 256]
-                s_xi = s_x[:, :, 0, :, :, :]  # [B, Support, 1, 256, 256]
-                s_yi = s_y[:, :, 0, :, :, :]
-
-                for s_idx in range(_config["n_shot"]):
-                    s_x_merge = s_xi.view(s_xi.size(0)*s_xi.size(1), 1, 256, 256)
-                    s_y_merge = s_yi.view(s_yi.size(0)*s_yi.size(1), 1, 256, 256)
-                    s_xi_encode_merge, _ = s_encoder(s_x_merge, s_y_merge)  # [B*S, 512, w, h]
-
-                s_xi_encode = s_xi_encode_merge.view(s_yi.size(0), s_yi.size(1), 512, encoded_w, encoded_h)
-                s_xi_encode_avg = torch.mean(s_xi_encode, dim=1)
-                # s_xi_encode, _ = s_encoder(s_xi, s_yi)  # [B, 512, w, h]
-                q_xi = q_x[:, 0, :, :, :]
-                q_yi = q_y[:, 0, :, :, :]
-                q_xi_encode, q_ft_list = q_encoder(q_xi)
-                sq_xi = torch.cat((s_xi_encode_avg, q_xi_encode), dim=1)
-                yhati = decoder(sq_xi, q_ft_list)  # [B, 1, 256, 256]
-                loss = criterion(yhati, q_yi)
-
-                loss_valid += loss
-                print(f"valid, iter:{i_iter}/{iter_n_val}, iter_loss:{loss}", end='\r')
 
                 if _config['record'] and i_iter == 0:
                     batch_i = 0
@@ -216,21 +162,12 @@ def main(_run, _config, _log):
                     visual = make_grid(frames, normalize=True, nrow=5)
                     writer.add_image("valid/visual", visual, i_epoch)
 
-        if min_val_loss > loss_valid:
-            min_epoch = i_epoch
-            min_val_loss = loss_valid
-            print(f"train - epoch:{i_epoch}/{_config['n_steps']}, epoch_loss:{loss_epoch} valid_loss:{loss_valid} \t => model saved", end='\n')
-            save_fname = f'{_run.observers[0].dir}/snapshots/lowest.pth'
-        else:
-            print(f"train - epoch:{i_epoch}/{_config['n_steps']}, epoch_loss:{loss_epoch} valid_loss:{loss_valid} - min epoch:{min_epoch}", end='\n')
-            save_fname = f'{_run.observers[0].dir}/snapshots/last.pth'
+        print(f"train - epoch:{i_epoch}/{_config['n_steps']}, epoch_loss:{loss_epoch}", end='\n')
+        save_fname = f'{_run.observers[0].dir}/snapshots/last.pth'
 
         _run.log_scalar("training.loss", float(loss_epoch), i_epoch)
-        _run.log_scalar("validation.loss", float(loss_valid), i_epoch)
-        _run.log_scalar("min_epoch", min_epoch, i_epoch)
         if _config['record']:
             writer.add_scalar('loss/train_loss', loss_epoch, i_epoch)
-            writer.add_scalar('loss/valid_loss', loss_valid, i_epoch)
 
         torch.save({
                 's_encoder': s_encoder.state_dict(),

@@ -82,16 +82,6 @@ def main(_run, _config, _log):
         pin_memory=False, #True load data while training gpu
         drop_last=True
     )
-    validationloader = DataLoader(
-        dataset=val_dataset,
-        batch_size=1,
-        # batch_size=_config['batch_size'],
-        shuffle=True,
-        num_workers=_config['n_work'],
-        pin_memory=False,#True
-        drop_last=False
-    )
-
     _log.info('###### Set optimizer ######')
     optimizer = torch.optim.SGD(model.parameters(), **_config['optim'])
     scheduler = MultiStepLR(optimizer, milestones=_config['lr_milestones'], gamma=0.1)
@@ -102,16 +92,10 @@ def main(_run, _config, _log):
         _log.info(f'##### board/train_{_config["board"]}_{date()}')
         writer = SummaryWriter(f'board/train_{_config["board"]}_{date()}')
 
-    min_val_loss = 100000.0
-    min_iter = 0
-    min_epoch = 0
-
-    i_iter = 0
     log_loss = {'loss': 0, 'align_loss': 0}
     _log.info('###### Training ######')
     for i_iter, sample_batched in enumerate(trainloader):
         # Prepare input
-
         s_x_orig = sample_batched['s_x'].cuda()  # [B, Support, slice_num=1, 1, 256, 256]
         s_x = s_x_orig.squeeze(2) # [B, Support, 1, 256, 256]
         s_y_fg_orig = sample_batched['s_y'].cuda()  # [B, Support, slice_num, 1, 256, 256]
@@ -127,7 +111,6 @@ def main(_run, _config, _log):
         s_y_fgs = [[s_y_fg[:,shot, ...] for shot in range(_config["n_shot"])]]
         s_y_bgs = [[s_y_bg[:,shot, ...] for shot in range(_config["n_shot"])]]
         q_xs = [q_x]
-        # pdb.set_trace()
         """
         Args:
             supp_imgs: support images
@@ -140,7 +123,6 @@ def main(_run, _config, _log):
                 N x [B x 1 x H x W], list of tensors
             qry_pred: [B, 2, H, W]
         """
-
 
         # Forward and Backward
         optimizer.zero_grad()
@@ -171,56 +153,10 @@ def main(_run, _config, _log):
                 query_pred = query_pred.argmax(dim=1)
                 query_pred = query_pred.unsqueeze(1)
                 frames += overlay_color(q_x_orig[batch_i,0], query_pred[batch_i].float(), q_y_orig[batch_i,0])
-                # frames += overlay_color(s_xi[batch_i], blank, s_yi[batch_i], scale=_config['scale'])
                 visual = make_grid(frames, normalize=True, nrow=2)
                 writer.add_image("train/visual", visual, i_iter)
 
 
-        if (i_iter + 1) % _config['save_pred_every'] == 0:
-            loss_valid = 0
-
-            with torch.no_grad():  ## validation stage
-                for i_iter_val, sample_batched in enumerate(validationloader):
-                    s_x_orig = sample_batched['s_x'].cuda()  # [B, Support, slice_num=1, 1, 256, 256]
-                    s_x = s_x_orig.squeeze(2)  # [B, Support, 1, 256, 256]
-                    s_y_fg_orig = sample_batched['s_y'].cuda()  # [B, Support, slice_num, 1, 256, 256]
-                    s_y_fg = s_y_fg_orig.squeeze(2)  # [B, Support, 1, 256, 256]
-                    s_y_fg = s_y_fg.squeeze(2)  # [B, Support, 256, 256]
-                    s_y_bg = torch.ones_like(s_y_fg) - s_y_fg
-                    q_x_orig = sample_batched['q_x'].cuda()  # [B, slice_num, 1, 256, 256]
-                    q_x = q_x_orig.squeeze(1)  # [B, 1, 256, 256]
-                    q_y_orig = sample_batched['q_y'].cuda()  # [B, slice_num, 1, 256, 256]
-                    q_y = q_y_orig.squeeze(1)  # [B, 1, 256, 256]
-                    q_y = q_y.squeeze(1).long()  # [B, 256, 256]
-                    s_xs = [[s_x[:, shot, ...] for shot in range(_config["n_shot"])]]
-                    s_y_fgs = [[s_y_fg[:, shot, ...] for shot in range(_config["n_shot"])]]
-                    s_y_bgs = [[s_y_bg[:, shot, ...] for shot in range(_config["n_shot"])]]
-                    q_xs = [q_x]
-                    query_pred, align_loss = model(s_xs, s_y_fgs, s_y_bgs, q_xs)
-                    query_loss = criterion(query_pred, q_y)
-                    loss_valid += query_loss
-
-                if _config['record']:
-                    batch_i = 0
-                    frames = []
-                    query_pred = query_pred.argmax(dim=1)
-                    query_pred = query_pred.unsqueeze(1)
-                    frames += overlay_color(q_x_orig[batch_i, 0], query_pred[batch_i].float(), q_y_orig[batch_i, 0])
-                    # frames += overlay_color(s_xi[batch_i], blank, s_yi[batch_i], scale=_config['scale'])
-                    visual = make_grid(frames, normalize=True, nrow=2)
-                    writer.add_image("valid/visual", visual, i_iter)
-
-                if min_val_loss > loss_valid:
-                    min_epoch = i_iter
-                    min_val_loss = loss_valid
-                    print(f"train - iter:{i_iter}, valid_loss:{loss_valid} \t => model saved", end='\n')
-                    save_fname = f'{_run.observers[0].dir}/snapshots/lowest.pth'
-                    torch.save(model.state_dict(),save_fname)
-
-            # _log.info('###### Taking snapshot ######')
-            # torch.save(model.state_dict(),
-            #            os.path.join(f'{_run.observers[0].dir}/snapshots', f'{i_iter + 1}.pth'))
-
-    # _log.info('###### Saving final model ######')
-    # torch.save(model.state_dict(),
-    #            os.path.join(f'{_run.observers[0].dir}/snapshots', f'{i_iter + 1}.pth'))
+            print(f"train - iter:{i_iter} \t => model saved", end='\n')
+            save_fname = f'{_run.observers[0].dir}/snapshots/last.pth'
+            torch.save(model.state_dict(),save_fname)

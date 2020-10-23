@@ -81,25 +81,12 @@ def main(_run, _config, _log):
         pin_memory=False, #True load data while training gpu
         drop_last=True
     )
-    validationloader = DataLoader(
-        dataset=val_dataset,
-        batch_size=1,
-        # batch_size=_config['batch_size'],
-        shuffle=True,
-        num_workers=_config['n_work'],
-        pin_memory=False,#True
-        drop_last=False
-    )
     _log.info('###### Create model ######')
     model = fs.FewShotSegmentorDoubleSDnet(net_params).cuda()
-    # model = nn.DataParallel(model.cuda(), device_ids=[_config['gpu_id'],])
     model.train()
 
     _log.info('###### Set optimizer ######')
-    # optimizer = torch.optim.SGD(model.parameters(), **_config['optim'])
-    # scheduler = MultiStepLR(optimizer, milestones=_config['lr_milestones'], gamma=0.1)
     optim = torch.optim.Adam
-    # optim = torch.optim.SGD
     optim_args = {"lr": train_params['learning_rate'],
                   "weight_decay": train_params['optim_weight_decay'],}
                   # "momentum": train_params['momentum']}
@@ -108,18 +95,12 @@ def main(_run, _config, _log):
     scheduler_s = lr_scheduler.StepLR(optim_s, step_size=100, gamma=0.1)
     scheduler_c = lr_scheduler.StepLR(optim_c, step_size=100, gamma=0.1)
     criterion = losses.DiceLoss()
-    # criterion = nn.CrossEntropyLoss(ignore_index=_config['ignore_label'])
 
     if _config['record']:  ## tensorboard visualization
         _log.info('###### define tensorboard writer #####')
         _log.info(f'##### board/train_{_config["board"]}_{date()}')
         writer = SummaryWriter(f'board/train_{_config["board"]}_{date()}')
 
-    min_val_loss = 100000.0
-    min_epoch = 0
-    min_iter = 0
-
-    i_iter = 0
     iter_print = _config["iter_print"]
     iter_n_train = len(trainloader)
     _log.info('###### Training ######')
@@ -157,7 +138,6 @@ def main(_run, _config, _log):
             avg_weights[0].append(None)
 
             output = model.segmentor(query_input, avg_weights)
-            # pdb.set_trace()
             loss = criterion(F.softmax(output, dim=1), y2)
             optim_s.zero_grad()
             optim_c.zero_grad()
@@ -171,9 +151,6 @@ def main(_run, _config, _log):
 
         scheduler_c.step()
         scheduler_s.step()
-
-
-        # print loss and take snapshots
         print(f'step {i_epoch+1}: loss: {epoch_loss}                               ')
 
         if _config['record']:
@@ -186,59 +163,5 @@ def main(_run, _config, _log):
             visual = make_grid(frames, normalize=True, nrow=2)
             writer.add_image("train/visual", visual, i_epoch)
 
-
-        loss_valid = 0
-        with torch.no_grad():  ## validation stage
-            for i_iter_val, sample_batched in enumerate(validationloader):
-                s_x = sample_batched['s_x'].cuda()  # [B, Support, slice_num=1, 1, 256, 256]
-                X = s_x.squeeze(2)  # [B, Support, 1, 256, 256]
-                s_y = sample_batched['s_y'].cuda()  # [B, Support, slice_num, 1, 256, 256]
-                Y = s_y.squeeze(2)  # [B, Support, 1, 256, 256]
-                Y = Y.squeeze(2)  # [B, Support, 256, 256]
-                q_x = sample_batched['q_x'].cuda()  # [B, slice_num, 1, 256, 256]
-                query_input = q_x.squeeze(1)  # [B, 1, 256, 256]
-                q_y = sample_batched['q_y'].cuda()  # [B, slice_num, 1, 256, 256]
-                y2 = q_y.squeeze(1)  # [B, 1, 256, 256]
-                y2 = y2.squeeze(1)  # [B, 256, 256]
-                y2 = y2.type(torch.LongTensor).cuda()
-
-                entire_weights = []
-                for shot_id in range(_config["n_shot"]):
-                    input1 = X[:, shot_id, ...]  # use 1 shot at first
-                    y1 = Y[:, shot_id, ...]  # use 1 shot at first
-                    condition_input = torch.cat((input1, y1.unsqueeze(1)), dim=1)
-                    weights = model.conditioner(condition_input)  # 2, 10, [B, channel=1, w, h]
-                    entire_weights.append(weights)
-
-                # pdb.set_trace()
-                avg_weights = [[], [None, None, None, None]]
-                for k in range(9):
-                    weight_cat = torch.cat([weights[0][k] for weights in entire_weights], dim=1)
-                    avg_weight = torch.mean(weight_cat, dim=1, keepdim=True)
-                    avg_weights[0].append(avg_weight)
-
-                avg_weights[0].append(None)
-
-                output = model.segmentor(query_input, avg_weights)
-                query_loss = criterion(F.softmax(output, dim=1), y2)
-                loss_valid += query_loss
-
-            if _config['record']:
-                batch_i = 0
-                frames = []
-                query_pred = output.argmax(dim=1)
-                query_pred = query_pred.unsqueeze(1)
-                frames += overlay_color(q_x[batch_i, 0], query_pred[batch_i].float(), q_y[batch_i, 0])
-                # frames += overlay_color(s_xi[batch_i], blank, s_yi[batch_i], scale=_config['scale'])
-                visual = make_grid(frames, normalize=True, nrow=2)
-                writer.add_image("valid/visual", visual, i_epoch)
-
-            if min_val_loss > loss_valid:
-                min_epoch = i_epoch
-                min_val_loss = loss_valid
-                print(f"train - epoch:{i_epoch}, valid_loss:{loss_valid} \t => model saved", end='\n')
-                save_fname = f'{_run.observers[0].dir}/snapshots/lowest.pth'
-                torch.save(model.state_dict(),save_fname)
-            else:
-                save_fname = f'{_run.observers[0].dir}/snapshots/last.pth'
-                torch.save(model.state_dict(),save_fname)
+        save_fname = f'{_run.observers[0].dir}/snapshots/last.pth'
+        torch.save(model.state_dict(),save_fname)
