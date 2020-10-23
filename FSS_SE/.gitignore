@@ -1,0 +1,10 @@
+.idea
+.idea/*
+**/venv
+**/.ipynb_checkpoints
+**/__pycache__/**
+saved_models/Ex**
+build
+build/*
+other_packages/
+dataset/
